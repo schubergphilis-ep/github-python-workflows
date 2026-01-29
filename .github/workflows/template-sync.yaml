@@ -1,0 +1,173 @@
+name: Template Paleofuturistic Python Sync
+
+on:
+  workflow_call:
+    inputs:
+      # Required inputs
+      project_description:
+        description: "Short project description."
+        required: true
+        type: string
+
+      project_name:
+        description: "Project name used by the template."
+        required: true
+        type: string
+
+      project_slug:
+        description: "Project slug name."
+        required: true
+        type: string
+
+      # Optional inputs
+      cruft_version:
+        description: "Version of Cruft to use."
+        required: false
+        type: string
+        default: "2.16.0"
+
+      email:
+        description: "Contact email used in metadata."
+        required: false
+        type: string
+        default: "int-mcaf@schubergphilis.com"
+
+      exclude_workflow_path:
+        description: "Workflow path in the consumer repo to exclude during bootstrap."
+        required: false
+        type: string
+        default: ".github/workflows/template-sync.yaml"
+
+      full_name:
+        description: "Author or organization name."
+        required: false
+        type: string
+        default: "Schuberg Philis"
+
+      include_apache_license:
+        description: "Whether the template should include the Apache license."
+        required: false
+        type: boolean
+        default: true
+
+      template_repo:
+        description: "Template repository URL."
+        required: false
+        type: string
+        default: "https://github.com/schubergphilis/paleofuturistic_python"
+
+      template_version:
+        description: "Template git ref (tag/branch/sha). Set to empty string to use default branch."
+        required: false
+        type: string
+        default: "v1.2.0"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  cruft:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@8e8c483db84b4bee98b60c0593521ed34d9990e8 #v6.0.1
+        with:
+          fetch-depth: 0
+          ref: ${{ github.ref }}
+          token: ${{ github.token }}
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@61cb8a9741eeb8a550a1b8544337180c0fc8476b #v7.2.0
+        with:
+          enable-cache: false
+
+      - name: Install cruft
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv tool install "cruft==${{ inputs.cruft_version }}"
+
+      - name: Detect cruft state
+        shell: bash
+        run: |
+          if [ -f ".cruft.json" ]; then
+            echo "CRUFT_MODE=update" >> "$GITHUB_ENV"
+          else
+            echo "CRUFT_MODE=bootstrap" >> "$GITHUB_ENV"
+          fi
+
+      - name: Resolve template version
+        shell: bash
+        run: |
+          if [ -n "${{ inputs.template_version }}" ]; then
+            echo "TEMPLATE_VERSION=${{ inputs.template_version }}" >> "$GITHUB_ENV"
+          else
+            echo "TEMPLATE_VERSION=main" >> "$GITHUB_ENV"
+          fi
+
+      - name: Apply Template
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ "${CRUFT_MODE}" = "bootstrap" ]; then
+            WORKDIR="$(mktemp -d)"
+            cd "$WORKDIR"
+
+            cruft create \
+              --no-input \
+              --checkout "$TEMPLATE_VERSION" \
+              --extra-context "{\"project_name\":\"${{ inputs.project_name }}\",\"project_slug\":\"${{ inputs.project_slug }}\",\"project_description\":\"${{ inputs.project_description }}\",\"full_name\":\"${{ inputs.full_name }}\",\"email\":\"${{ inputs.email }}\",\"include_apache_license\":${{ inputs.include_apache_license }}}" \
+              "${{ inputs.template_repo }}"
+
+            test -d "${{ inputs.project_slug }}"
+
+            # Build rsync exclude args
+            EXCLUDES=(--exclude ".git/")
+            if [ -n "${{ inputs.exclude_workflow_path }}" ]; then
+              EXCLUDES+=(--exclude "${{ inputs.exclude_workflow_path }}")
+            fi
+
+            # Sync generated content into repo workspace
+            rsync -a --delete \
+              "${EXCLUDES[@]}" \
+              "$WORKDIR/${{ inputs.project_slug }}/." "$GITHUB_WORKSPACE/"
+
+            cd "$GITHUB_WORKSPACE"
+
+            # Ensure lockfiles / dependencies are in sync before committing bootstrap
+            uv sync --all-extras --dev
+
+          else
+            # cruft update returns non-zero if merge conflicts etc; we want PR creation to still run
+            cruft update --checkout "$TEMPLATE_VERSION" --skip-apply-ask || true
+          fi
+
+      - name: Create PR if there are changes
+        uses: peter-evans/create-pull-request@c0f553fe549906ede9cf27b5156039d195d2ece0 #v8.1.0
+        with:
+          token: ${{ github.token }}
+          title: "chore(template): ${{ env.CRUFT_MODE }} development workflow repository files from template: paleofuturistic python (${{ env.TEMPLATE_VERSION }})"
+          commit-message: "chore(template): ${{ env.CRUFT_MODE }} development workflow repository files from template: paleofuturistic python (${{ env.TEMPLATE_VERSION }})"
+          branch: automation/template-${{ env.CRUFT_MODE }}
+          delete-branch: true
+          body: |
+            This PR syncs this repository with the Paleofuturistic Python template.
+
+            **Template source**
+            https://github.com/schubergphilis/paleofuturistic_python
+
+            **What you get**
+            - Project structure and documentation scaffolding
+            - Dependency management and environment management (via uv)
+            - Testing, linting, formatting, and type checking
+            - Quality and CI automation
+            - Build, release, and distribution workflows
+
+            **Action required**
+            ${{ env.CRUFT_MODE == 'bootstrap' && 'This PR bootstraps the repository from the template. Please **merge this PR** to complete the initial setup and enable all workflows.' || '' }}
+
+            ${{ env.CRUFT_MODE == 'update' && 'This PR updates the repository to the latest template version. Please **review and merge this PR** to apply the latest template changes.' || '' }}
+            
