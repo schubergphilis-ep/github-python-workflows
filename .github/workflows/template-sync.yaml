@@ -63,7 +63,7 @@ on:
         default: "v1.2.0"
 
 permissions:
-  contents: write
+  contents: read
   pull-requests: write
 
 jobs:
